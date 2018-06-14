@@ -14,6 +14,12 @@
 #include <pcl/common/transforms.h>
 #include <pcl/surface/mls.h>
 
+#include <pcl/io/vtk_io.h>
+#include <pcl/surface/gp3.h>
+#include <pcl/kdtree/kdtree_flann.h>
+
+#include <pcl/surface/concave_hull.h>
+
 // declare class
 class Plan {
   public:
@@ -79,6 +85,9 @@ std::vector<int> compute_full_indices (const std::vector<int> perfect_cluster_in
 std::vector<int> remove_outliers_from_last_cluster (const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud,
                                                     std::vector<int> &last_cluster_indices);
 int smooth_cloud (pcl::PointCloud <pcl::PointXYZ>::Ptr &cloud);
+std::vector<int> compute_indices_inlier_no_ground(const std::vector <pcl::PointIndices> &clusters,
+                                                  const std::vector<Plan> &plans,
+                                                  bool two_ground_plan);
 
 //-----------------------------------------------------------------------------------------------------//
 
@@ -338,6 +347,26 @@ std::vector<int> compute_indices_inlier (const std::vector <pcl::PointIndices> &
   return cluster_indices;
 }
 
+std::vector<int> compute_indices_inlier_no_ground(const std::vector <pcl::PointIndices> &clusters,
+                                                  const std::vector<Plan> &plans,
+                                                  bool two_ground_plan) {
+  int start;
+  if (two_ground_plan) {
+    start = 2;
+  } else {
+    start = 1;
+  }
+
+  std::vector<int> cluster_indices(clusters[plans[start].index].indices);
+  for (int i = start+1; i < plans.size(); i++) {
+    cluster_indices.insert(cluster_indices.end(), clusters[plans[i].index].indices.begin(),
+                           clusters[plans[i].index].indices.end());
+  }
+  // std::sort(cluster_indices.begin(), cluster_indices.end());
+
+  return cluster_indices;
+}
+
 std::vector<int> compute_full_indices (const std::vector<int> perfect_cluster_indices,
                                        const std::vector<int> &last_cluster_indices) {
   std::vector<int> cluster_indices(perfect_cluster_indices);
@@ -500,12 +529,10 @@ int main (int argc, char** argv) {
 
   // get normal of ground after transformation
   std::vector<float> ground_normal_transformed = compute_ground_normal(plans_transformed, two_ground_plan);
-  // std::cout << "ground normal x after trans: " << ground_normal_transformed[0] <<std::endl;
-  // std::cout << "ground normal y after trans: " << ground_normal_transformed[1] <<std::endl;
-  // std::cout << "ground normal z after trans: " << ground_normal_transformed[2] <<std::endl;
 
   // extract indices for outliers
   std::vector<int> cluster_indices = compute_indices_inlier(clusters);
+  std::vector<int> cluster_indices_no_ground = compute_indices_inlier_no_ground(clusters, plans_transformed, two_ground_plan);
   std::vector<int> outlier_indices = compute_indices_outlier(cloud, clusters, cluster_indices);
   float ground_z;
   if (two_ground_plan) {
@@ -514,27 +541,31 @@ int main (int argc, char** argv) {
     ground_z = plans_transformed[0].z;
   }
   std::vector<int> last_cluster_indices = compute_last_cluster(cloud_transformed, ground_normal_transformed, normals_transformed, outlier_indices, ground_z);
-  // pcl::PointCloud<pcl::Normal>::Ptr last_cluster (new pcl::PointCloud<pcl::Normal>(*normals_transformed, last_cluster_indices));
-  // pcl::io::savePCDFileASCII ("last_cluster_normal.pcd", *last_cluster);
-  // pcl::PointCloud<pcl::PointXYZ>::Ptr last_cluster (new pcl::PointCloud<pcl::PointXYZ>(*cloud_transformed, last_cluster_indices));
-  // pcl::io::savePCDFileASCII ("last_cluster_cloud.pcd", *last_cluster);
 
-  // std::cout << "length of ouliers: " << outlier_indices.size() << std::endl;
-  // std::cout << "length of last cluster: " << last_cluster_indices.size() << std::endl;
-
-  // extract full indices
+  // extract indices and generate point clouds from different aspects
   std::vector<int> full_indices = compute_full_indices (cluster_indices, last_cluster_indices);
   pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_full_indices (new pcl::PointCloud<pcl::PointXYZ>(*cloud_transformed, full_indices));
+  std::vector<int> full_no_ground_indices = compute_full_indices (cluster_indices_no_ground, last_cluster_indices);
+  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_full_no_ground_indices (new pcl::PointCloud<pcl::PointXYZ>(*cloud_transformed, full_no_ground_indices));
   pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_stable_indices (new pcl::PointCloud<pcl::PointXYZ>(*cloud_transformed, cluster_indices));
+  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_stable_no_ground_indices (new pcl::PointCloud<pcl::PointXYZ>(*cloud_transformed, cluster_indices_no_ground));
   pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_last_indices (new pcl::PointCloud<pcl::PointXYZ>(*cloud_transformed, last_cluster_indices));
+  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_main_pile (new pcl::PointCloud<pcl::PointXYZ>(*cloud_transformed, clusters[0].indices));
+  // pcl::PointCloud<pcl::Normal>::Ptr normals_main_pile (new pcl::PointCloud <pcl::Normal>(*normals_transformed, clusters[0].indices));
 
+  // construct triangle
+  // pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_hull (new pcl::PointCloud<pcl::PointXYZ>);
+  pcl::ConcaveHull<pcl::PointXYZ> chull;
+  chull.setInputCloud(cloud_full_indices);
+  chull.setAlpha(3.0);
+  // chull.setDimension(2);
+  pcl::PolygonMesh triangles;
+  chull.reconstruct(triangles);
+  pcl::io::saveVTKFile ("mesh_full_chull.3.0.vtk", triangles);
+  // chull.reconstruct (*cloud_hull);
 
-
-  // write if needed
-  // write_clusters(cloud_transformed, clusters, "gridn_cloud_transformed_x");
-
-
-  plot(cloud_full_indices);
+  // interactive 3-D plot
+  // plot(cloud_full_indices);
   // plot(cloud_stable_indices);
   // plot(cloud_last_indices);
   // plot(cloud_transformed);
