@@ -20,6 +20,9 @@
 
 #include <pcl/surface/concave_hull.h>
 
+#include <fstream>
+#include <iterator>
+
 // declare class
 class Plan {
   public:
@@ -34,6 +37,29 @@ class ByZ {
     bool operator()(Plan const &a, Plan const &b) { 
         return a.z > b.z;
     }
+};
+
+class GroundBoundray {
+  public:
+    float x;
+    float y;
+    float d;
+    int index;
+    GroundBoundray(float x, float y, float d, int index): x(x), y(y), d(d), index(index) {}
+};
+class ByD {
+  public:
+    bool operator()(GroundBoundray const &a, GroundBoundray const &b) {
+      return a.d > b.d;
+    }
+};
+
+class Circle {
+  public:
+    float cx;
+    float cy;
+    float r;
+    Circle(float cx, float cy, float r): cx(cx), cy(cy), r(r) {}
 };
 
 // declare function
@@ -88,6 +114,12 @@ int smooth_cloud (pcl::PointCloud <pcl::PointXYZ>::Ptr &cloud);
 std::vector<int> compute_indices_inlier_no_ground(const std::vector <pcl::PointIndices> &clusters,
                                                   const std::vector<Plan> &plans,
                                                   bool two_ground_plan);
+std::vector<float> compute_center_least_squares(const pcl::PointCloud <pcl::PointXYZ>::Ptr &main_pile_cloud,
+                                                const pcl::PointCloud <pcl::Normal>::Ptr &main_pile_normal);
+Circle compute_center(const pcl::PointCloud <pcl::PointXYZ>::Ptr &cloud_transformed,
+                      const std::vector<int> ground_indices);
+float compute_r_main_pile(const pcl::PointCloud <pcl::PointXYZ>::Ptr &cloud_main_pile,
+                          const Circle &ground_circle);
 
 //-----------------------------------------------------------------------------------------------------//
 
@@ -447,7 +479,6 @@ std::vector<int> compute_last_cluster(const pcl::PointCloud<pcl::PointXYZ>::Ptr 
 
     float theta = std::acos(normal_x0 * normal_x + normal_y0 * normal_y + normal_z0 * normal_z) * 180.0 / M_PI;
     if ( (theta >= 0) && (theta <= 16) ) {
-    // if (true) {
       if (z >= ground_z) {
         last_cluster.push_back(outlier_indices[i]);
       } else {}
@@ -477,6 +508,140 @@ int smooth_cloud (pcl::PointCloud <pcl::PointXYZ>::Ptr &cloud) {
   pcl::io::savePCDFile ("mls.pcd", mls_points);
 
   return 0;
+}
+
+std::vector<float> compute_center_least_squares(const pcl::PointCloud <pcl::PointXYZ>::Ptr &main_pile_cloud,
+                                                const pcl::PointCloud <pcl::Normal>::Ptr &main_pile_normal) {
+  // use least squares to calculate the center point
+  float a = 0;
+  float b = 0;
+  float c = 0;
+  float d = 0;
+  float e = 0;
+  float f = 0;
+  float g = 0;
+
+  for (int i=0; i < main_pile_cloud->points.size(); i++) {
+    a += std::pow(main_pile_normal->points[i].normal_x, 2);
+    b += std::pow(main_pile_normal->points[i].normal_y, 2);
+    c += main_pile_normal->points[i].normal_x * main_pile_normal->points[i].normal_y;
+    d += std::pow(main_pile_normal->points[i].normal_y, 2) * main_pile_cloud->points[i].x;
+    e += std::pow(main_pile_normal->points[i].normal_x, 2) * main_pile_cloud->points[i].y;
+    f += main_pile_normal->points[i].normal_x * main_pile_normal->points[i].normal_y * main_pile_cloud->points[i].y;
+    f += main_pile_normal->points[i].normal_x * main_pile_normal->points[i].normal_y * main_pile_cloud->points[i].x;
+  }
+
+  float center_x = ((d - f) * c - (g - e) * b) / (a * b - std::pow(c, 2));
+  float center_y = ((d - f) * a - (g - e) * c) / (a * b - std::pow(c, 2));
+
+  std::vector<float> center;
+  center.push_back(center_x);
+  center.push_back(center_y);
+
+  return center;
+}
+
+Circle compute_center(const pcl::PointCloud <pcl::PointXYZ>::Ptr &cloud_transformed,
+                      const std::vector<int> ground_indices) {
+  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_ground (new pcl::PointCloud<pcl::PointXYZ>(*cloud_transformed, ground_indices));
+  for (int i=0; i < cloud_ground->size(); i++) {
+    cloud_ground->points[i].z = 0;
+  }
+
+  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_hull (new pcl::PointCloud<pcl::PointXYZ>);
+  pcl::ConcaveHull<pcl::PointXYZ> chull;
+  chull.setInputCloud(cloud_ground);
+  chull.setAlpha(3.0);
+  chull.setDimension(2);
+  chull.reconstruct (*cloud_hull);
+
+  std::vector<GroundBoundray> gbs;
+  for (int i=0; i < cloud_hull->size(); i++) {
+    float x = cloud_hull->points[i].x;
+    float y = cloud_hull->points[i].y;
+    float d = std::sqrt(std::pow(x, 2) + std::pow(y, 2));
+    GroundBoundray gb(x, y, d, i);
+    gbs.push_back(gb);
+  }
+  std::sort(gbs.begin(), gbs.end(), ByD());
+
+  std::vector<int> gb_idx;
+  for (int i=0; i < gbs.size()/2; i++) {
+    gb_idx.push_back(gbs[i].index);
+  }
+
+  // plot if needed
+  // pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_hull_v (new pcl::PointCloud<pcl::PointXYZ>(*cloud_hull, gb_idx));
+  // plot(cloud_hull_v);
+
+  float center_x, center_y;
+
+  float x1, y1, x2, y2, x3, y3;
+  x1 = cloud_hull->points[gb_idx[0]].x;
+  y1 = cloud_hull->points[gb_idx[0]].y;
+  x2 = cloud_hull->points[gb_idx[gb_idx.size()/2]].x;
+  y2 = cloud_hull->points[gb_idx[gb_idx.size()/2]].y;
+  x3 = cloud_hull->points[gb_idx.size()-1].x;
+  y3 = cloud_hull->points[gb_idx.size()-1].y;
+
+  float mu_x_12 = (x1 + x2) / 2;
+  float mu_y_12 = (y1 + y2) / 2;
+  float mu_x_23 = (x2 + x3) / 2;
+  float mu_y_23 = (y2 + y3) / 2;
+
+  float k_12, k_23;
+  if (x1 - x2 == 0) {
+    center_y = mu_y_12;
+    k_23 = (y3 - y2) / (x3 - x2);
+    center_x = -center_y * k_23 + mu_x_23 + mu_y_23 * k_23;
+  } else if (x3 - x2 == 0) {
+    center_y = mu_y_23;
+    k_12 = (y2 - y1) / (x2 - x1);
+    center_x = -center_y * k_12 + mu_x_12 + mu_y_12 * k_12;
+  } else {
+    k_12 = (y1 - y2) / (x1 - x2);
+    k_23 = (y2 - y3) / (x2 - x3);
+    
+    if (k_12 == 0) {
+      center_x = mu_x_12;
+      center_y = (mu_x_12 - mu_x_23 + mu_y_12 * k_12 - mu_y_23 * k_23) / (k_12 - k_23);
+    } else if (k_23 == 0) {
+      center_x = mu_x_23;
+      center_y = (mu_x_12 - mu_x_23 + mu_y_12 * k_12 - mu_y_23 * k_23) / (k_12 - k_23);
+    } else {
+      center_y = (mu_x_12 - mu_x_23 + mu_y_12 * k_12 - mu_y_23 * k_23) / (k_12 - k_23);
+      center_x = (mu_y_12 - mu_y_23 + mu_x_12 / k_12 - mu_x_23 / k_23) / (1 / k_12 - 1/ k_23);
+    }
+  }
+
+  float r1, r2, r3;
+  r1 = std::sqrt(std::pow(x1 - center_x, 2) + std::pow(y1 - center_y, 2));
+  r2 = std::sqrt(std::pow(x2 - center_x, 2) + std::pow(y2 - center_y, 2));
+  r3 = std::sqrt(std::pow(x3 - center_x, 2) + std::pow(y3 - center_y, 2));
+
+  float r = (r1 + r2 + r3) / 3;
+
+  Circle ground_circle(center_x, center_y, r);
+
+  return ground_circle;
+}
+
+float compute_r_main_pile(const pcl::PointCloud <pcl::PointXYZ>::Ptr &cloud_main_pile,
+                          const Circle &ground_circle) {
+  float max_r = 0;
+  float cx = ground_circle.cx;
+  float cy = ground_circle.cy;
+  for (int i=0; i < cloud_main_pile->size(); i++) {
+    float x = cloud_main_pile->points[i].x;
+    float y = cloud_main_pile->points[i].y;
+    
+    float r = std::sqrt(std::pow(x-cx, 2) + std::pow(y-cy, 2));
+    if (r > max_r) {
+      max_r = r;
+    }
+  }
+
+  return max_r;
 }
 
 //-----------------------------------------------------------------------------------------------------//
@@ -530,9 +695,22 @@ int main (int argc, char** argv) {
   // get normal of ground after transformation
   std::vector<float> ground_normal_transformed = compute_ground_normal(plans_transformed, two_ground_plan);
 
+  // detect the main pile cluster
+  float angle_repose = 0.0;
+  int main_pile_index_in_plans = 0;
+  for (int i=0; i < plans_transformed.size(); i++) {
+    float angle = std::acos(plans_transformed[i].normal[0] * ground_normal_transformed[0] +
+                            plans_transformed[i].normal[1] * ground_normal_transformed[1] +
+                            plans_transformed[i].normal[2] * ground_normal_transformed[2]) * 180.0 / M_PI;
+    if (angle > angle_repose) {
+      angle_repose = angle;
+      main_pile_index_in_plans = i;
+    }
+  }
+  std::cout << "angle pose: " << angle_repose << std::endl;
+
   // extract indices for outliers
   std::vector<int> cluster_indices = compute_indices_inlier(clusters);
-  std::vector<int> cluster_indices_no_ground = compute_indices_inlier_no_ground(clusters, plans_transformed, two_ground_plan);
   std::vector<int> outlier_indices = compute_indices_outlier(cloud, clusters, cluster_indices);
   float ground_z;
   if (two_ground_plan) {
@@ -545,26 +723,56 @@ int main (int argc, char** argv) {
   // extract indices and generate point clouds from different aspects
   std::vector<int> full_indices = compute_full_indices (cluster_indices, last_cluster_indices);
   pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_full_indices (new pcl::PointCloud<pcl::PointXYZ>(*cloud_transformed, full_indices));
+
+  std::vector<int> cluster_indices_no_ground = compute_indices_inlier_no_ground(clusters, plans_transformed, two_ground_plan);
   std::vector<int> full_no_ground_indices = compute_full_indices (cluster_indices_no_ground, last_cluster_indices);
   pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_full_no_ground_indices (new pcl::PointCloud<pcl::PointXYZ>(*cloud_transformed, full_no_ground_indices));
+
   pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_stable_indices (new pcl::PointCloud<pcl::PointXYZ>(*cloud_transformed, cluster_indices));
   pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_stable_no_ground_indices (new pcl::PointCloud<pcl::PointXYZ>(*cloud_transformed, cluster_indices_no_ground));
+
   pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_last_indices (new pcl::PointCloud<pcl::PointXYZ>(*cloud_transformed, last_cluster_indices));
-  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_main_pile (new pcl::PointCloud<pcl::PointXYZ>(*cloud_transformed, clusters[0].indices));
-  // pcl::PointCloud<pcl::Normal>::Ptr normals_main_pile (new pcl::PointCloud <pcl::Normal>(*normals_transformed, clusters[0].indices));
+
+  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_main_pile (new pcl::PointCloud<pcl::PointXYZ>(*cloud_transformed, clusters[plans_transformed[main_pile_index_in_plans].index].indices));
+  pcl::PointCloud<pcl::Normal>::Ptr normal_main_pile (new pcl::PointCloud<pcl::Normal>(*normals_transformed, clusters[plans_transformed[main_pile_index_in_plans].index].indices));
+
+  std::vector<int> ground_indices(clusters[plans_transformed[0].index].indices);
+  if (two_ground_plan) {
+    ground_indices.insert(ground_indices.end(), clusters[plans_transformed[1].index].indices.begin(), clusters[plans_transformed[1].index].indices.end());
+  }
+  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_ground (new pcl::PointCloud<pcl::PointXYZ>(*cloud_transformed, ground_indices));
 
   // construct triangle
   // pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_hull (new pcl::PointCloud<pcl::PointXYZ>);
-  pcl::ConcaveHull<pcl::PointXYZ> chull;
-  chull.setInputCloud(cloud_full_indices);
-  chull.setAlpha(3.0);
-  // chull.setDimension(2);
-  pcl::PolygonMesh triangles;
-  chull.reconstruct(triangles);
-  pcl::io::saveVTKFile ("mesh_full_chull.3.0.vtk", triangles);
+  // // std::vector< pcl::Vertices > polygons;
+  // pcl::ConcaveHull<pcl::PointXYZ> chull;
+  // chull.setInputCloud(cloud_ground);
+  // chull.setAlpha(3.0);
+  // // chull.setDimension(2);
+  // pcl::PolygonMesh triangles;
+  // chull.reconstruct(triangles);
+  // // pcl::io::saveVTKFile ("mesh_ground_chull.3.0.vtk", triangles);
   // chull.reconstruct (*cloud_hull);
 
+
+  // compute the center
+  Circle ground_circle = compute_center(cloud_transformed, ground_indices);
+  std::cout << "center x: " << ground_circle.cx << std::endl;
+  std::cout << "center y: " << ground_circle.cy << std::endl;
+  std::cout << "ground circle r: " << ground_circle.r << std::endl;
+
+  float r_main_pile =  compute_r_main_pile(cloud_main_pile, ground_circle);
+  std::cout << "main pile r: " << r_main_pile << std::endl;
+
+
   // interactive 3-D plot
+  // for plot the center
+  // (*cloud_main_pile).insert( (*cloud_main_pile).end(), 1, pcl::PointXYZ(ground_circle.cx, ground_circle.cy, ground_z) );
+  // plot(cloud_main_pile);
+
+  // plot the main pile
+  // plot(cloud_main_pile);
+
   // plot(cloud_full_indices);
   // plot(cloud_stable_indices);
   // plot(cloud_last_indices);
