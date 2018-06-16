@@ -19,9 +19,12 @@
 #include <pcl/kdtree/kdtree_flann.h>
 
 #include <pcl/surface/concave_hull.h>
+#include <pcl/surface/convex_hull.h>
 
 #include <fstream>
 #include <iterator>
+
+#include <algorithm>
 
 // declare class
 class Plan {
@@ -60,6 +63,13 @@ class Circle {
     float cy;
     float r;
     Circle(float cx, float cy, float r): cx(cx), cy(cy), r(r) {}
+};
+
+class Point {
+  public:
+    float x;
+    float y;
+    Point(float x, float y): x(x), y(y) {}
 };
 
 // declare function
@@ -120,6 +130,17 @@ Circle compute_center(const pcl::PointCloud <pcl::PointXYZ>::Ptr &cloud_transfor
                       const std::vector<int> ground_indices);
 float compute_r_main_pile(const pcl::PointCloud <pcl::PointXYZ>::Ptr &cloud_main_pile,
                           const Circle &ground_circle);
+float compute_volume_4_cluster(const pcl::PointCloud <pcl::PointXYZ>::Ptr &cloud_transformed,
+                               const std::vector<int> &clusters_indices,
+                               float bottom_z);
+float sign (Point &p1, Point &p2, Point &p3);
+bool PointInTriangle (Point &pt, Point &v1, Point &v2, Point &v3);
+pcl::PointCloud<pcl::PointXYZ>::Ptr compute_center_cloud_4_polygons(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_hull,
+                                                                    const std::vector< pcl::Vertices > &polygons);
+std::vector< pcl::Vertices> compute_lower_surface_polygons (const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_hull,
+                                                            const pcl::PointCloud <pcl::PointXYZ>::Ptr &cloud_polygon_center,
+                                                            const std::vector< pcl::Vertices> &polygons,
+                                                            const pcl::KdTreeFLANN<pcl::PointXYZ> &kdtree);
 
 //-----------------------------------------------------------------------------------------------------//
 
@@ -644,6 +665,226 @@ float compute_r_main_pile(const pcl::PointCloud <pcl::PointXYZ>::Ptr &cloud_main
   return max_r;
 }
 
+float sign (Point &p1, Point &p2, Point &p3)
+{
+    return (p1.x - p3.x) * (p2.y - p3.y) - (p2.x - p3.x) * (p1.y - p3.y);
+}
+
+bool PointInTriangle (Point &pt, Point &v1, Point &v2, Point &v3)
+{
+    bool b1, b2, b3;
+
+    b1 = sign(pt, v1, v2) < 0.0f;
+    b2 = sign(pt, v2, v3) < 0.0f;
+    b3 = sign(pt, v3, v1) < 0.0f;
+
+    return ((b1 == b2) && (b2 == b3));
+}
+
+pcl::PointCloud<pcl::PointXYZ>::Ptr compute_center_cloud_4_polygons(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_hull,
+                                                                    const std::vector< pcl::Vertices > &polygons) {
+  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_polygon_center (new pcl::PointCloud<pcl::PointXYZ>);
+  cloud_polygon_center->width = polygons.size();
+  cloud_polygon_center->height = 1;
+  cloud_polygon_center->points.resize (cloud_polygon_center->width * cloud_polygon_center->height);
+
+  for (int i=0; i < polygons.size(); i++) {
+    float cx = 0;
+    float cy = 0;
+    for (int j=0; j < polygons[i].vertices.size(); j++) {
+      cx += cloud_hull->points[polygons[i].vertices[j]].x;
+      cy += cloud_hull->points[polygons[i].vertices[j]].y;
+    }
+    cx /= polygons[i].vertices.size();
+    cy /= polygons[i].vertices.size();
+
+    cloud_polygon_center->points[i].x = cx;
+    cloud_polygon_center->points[i].y = cy;
+    cloud_polygon_center->points[i].z = 0;
+  }
+
+  return cloud_polygon_center;
+}
+
+std::vector< pcl::Vertices> compute_lower_surface_polygons (const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_hull,
+                                                            const pcl::PointCloud <pcl::PointXYZ>::Ptr &cloud_polygon_center,
+                                                            const std::vector< pcl::Vertices> &polygons,
+                                                            const pcl::KdTreeFLANN<pcl::PointXYZ> &kdtree) {
+
+  int K = 1500;
+  // float radius = 1;
+  std::vector<int> pointIdxNKNSearch(K);
+  std::vector<float> pointNKNSquaredDistance(K);
+
+  std::vector< pcl::Vertices> polygons2use;
+  for (int i=0; i < polygons.size(); i++) {
+    pcl::PointXYZ searchPoint = cloud_polygon_center->points[i];
+    Point pt = Point(cloud_polygon_center->points[i].x, cloud_polygon_center->points[i].y);
+
+    float min_z = (cloud_hull->points[polygons[i].vertices[0]].z +
+                   cloud_hull->points[polygons[i].vertices[1]].z +
+                   cloud_hull->points[polygons[i].vertices[2]].z) / 3;
+    bool remain = true;
+
+    if ( kdtree.nearestKSearch(searchPoint, K, pointIdxNKNSearch, pointNKNSquaredDistance) > 0 ) {
+    // if ( kdtree.radiusSearch(searchPoint, radius, pointIdxNKNSearch, pointNKNSquaredDistance) > 0 ) {
+      for (size_t j = 0; j < pointIdxNKNSearch.size (); j++) {
+        Point v1 = Point(cloud_hull->points[polygons[pointIdxNKNSearch[j]].vertices[0]].x,
+                         cloud_hull->points[polygons[pointIdxNKNSearch[j]].vertices[0]].y);
+        Point v2 = Point(cloud_hull->points[polygons[pointIdxNKNSearch[j]].vertices[1]].x,
+                         cloud_hull->points[polygons[pointIdxNKNSearch[j]].vertices[1]].y);
+        Point v3 = Point(cloud_hull->points[polygons[pointIdxNKNSearch[j]].vertices[2]].x,
+                         cloud_hull->points[polygons[pointIdxNKNSearch[j]].vertices[2]].y);
+        if (PointInTriangle(pt, v1, v2, v3)) {
+          float polygon_z = (cloud_hull->points[polygons[pointIdxNKNSearch[j]].vertices[0]].z +
+                             cloud_hull->points[polygons[pointIdxNKNSearch[j]].vertices[1]].z +
+                             cloud_hull->points[polygons[pointIdxNKNSearch[j]].vertices[2]].z ) / 3;
+          if (polygon_z < min_z) {
+            remain = false;
+            break;
+          }
+        }
+      }
+    }
+
+    if (remain) {
+      polygons2use.push_back(polygons[i]);
+    }
+  }
+
+  // std::cout << "origin size: " << polygons.size() << std::endl;
+  // std::cout << "current size: " << polygons2use.size() << std::endl;
+  return polygons2use;
+}
+
+float compute_volume_4_cluster(const pcl::PointCloud <pcl::PointXYZ>::Ptr &cloud_transformed,
+                               const std::vector<int> &clusters_indices,
+                               float bottom_z) {
+  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_cluster (new pcl::PointCloud<pcl::PointXYZ>(*cloud_transformed, clusters_indices));
+
+  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_hull (new pcl::PointCloud<pcl::PointXYZ>);
+  std::vector< pcl::Vertices > polygons;
+
+  pcl::ConcaveHull<pcl::PointXYZ> chull;
+  chull.setInputCloud(cloud_cluster);
+  chull.setAlpha(3.0);
+  // pcl::io::saveVTKFile ("mesh_full_chull.3.0.vtk", triangles);
+  chull.reconstruct (*cloud_hull, polygons);
+
+  // --remove some polygons
+  std::vector< pcl::Vertices> lower_surface_polygons;
+  if (polygons[0].vertices.size() == 3) {
+    // 1. construct center point cloud for polygons
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_polygon_center = compute_center_cloud_4_polygons(cloud_hull, polygons);
+
+    // 2. just remain those in the lower surface (use kdtree to fast the process)
+    pcl::KdTreeFLANN<pcl::PointXYZ> kdtree;
+    kdtree.setInputCloud(cloud_polygon_center);
+
+    lower_surface_polygons = compute_lower_surface_polygons (cloud_hull, cloud_polygon_center, polygons, kdtree);
+  } else {
+    lower_surface_polygons = polygons;
+  }
+
+  // --compute volume under the lower polygons
+
+  float volume_cluster = 0;
+  for (int i=0; i < lower_surface_polygons.size(); i++) {
+    std::vector<uint32_t> indices = lower_surface_polygons[i].vertices;
+
+    // using signed area to calculate the area of the project
+    float area_project = 0;
+    for (int j=0; j < indices.size(); j++) {
+      float x0 = cloud_hull->points[indices[j]].x;
+      float y0 = cloud_hull->points[indices[j]].y;
+      float x1 = cloud_hull->points[indices[(j+1)%indices.size()]].x;
+      float y1 = cloud_hull->points[indices[(j+1)%indices.size()]].y;
+      area_project += x0 * y1 - x1 * y0;
+    }
+    area_project = std::abs(area_project) / 2;
+
+    // calcualte the centroid z
+    float cz = 0;
+    if (indices.size() == 3) {
+      for (int j=0; j < indices.size(); j++) {
+        cz += cloud_hull->points[indices[j]].z;
+      }
+      cz /= 3;
+    } else {
+      // https://math.stackexchange.com/questions/1338/compute-the-centroid-of-a-3d-planar-polygon-without-projecting-it-to-specific-pl
+      // normals
+      float e1x = cloud_hull->points[indices[0]].x - cloud_hull->points[indices[indices.size()/4]].x;
+      float e1y = cloud_hull->points[indices[0]].y - cloud_hull->points[indices[indices.size()/4]].y;
+      float e1z = cloud_hull->points[indices[0]].z - cloud_hull->points[indices[indices.size()/4]].z;
+      float e2x = cloud_hull->points[indices[0]].x - cloud_hull->points[indices[indices.size()* 3 /4]].x;
+      float e2y = cloud_hull->points[indices[0]].y - cloud_hull->points[indices[indices.size()* 3 /4]].y;
+      float e2z = cloud_hull->points[indices[0]].z - cloud_hull->points[indices[indices.size()* 3 /4]].z;
+
+      float nx = e1y * e2z - e1z * e2y;
+      float ny = e1z * e2x - e1x * e2z;
+      float nz = e1x * e2y - e1y * e2x;
+
+      e2x = e1y * nz - e1z * ny;
+      e2y = e1z * nx - e1x * nz;
+      e2z = e1x * ny - e1y * nx;
+
+      float length_e1 = std::sqrt(std::pow(e1x, 2) + std::pow(e1y, 2) + std::pow(e1z, 2));
+      e1x /= length_e1;
+      e1y /= length_e1;
+      e1z /= length_e1;
+      float length_e2 = std::sqrt(std::pow(e2x, 2) + std::pow(e2y, 2) + std::pow(e2z, 2));
+      e2x /= length_e2;
+      e2y /= length_e2;
+      e2z /= length_e2;
+
+      // anchor point
+      float x_a = cloud_hull->points[indices[0]].x;
+      float y_a = cloud_hull->points[indices[0]].y;
+      float z_a = cloud_hull->points[indices[0]].z;
+
+      float area_signed = 0;
+      float Cx = 0;
+      float Cy = 0;
+      for (int j=0; j < indices.size(); j++) {
+        float x0 = cloud_hull->points[indices[j]].x;
+        float y0 = cloud_hull->points[indices[j]].y;
+        float z0 = cloud_hull->points[indices[j]].z;
+        float x1 = cloud_hull->points[indices[(j+1)%indices.size()]].x;
+        float y1 = cloud_hull->points[indices[(j+1)%indices.size()]].y;
+        float z1 = cloud_hull->points[indices[(j+1)%indices.size()]].z;
+
+        // transform
+        float t_x0 = (x0 - x_a) * e1x + (y0 - y_a) * e1y + (z0 - z_a) * e1z;
+        float t_y0 = (x0 - x_a) * e2x + (y0 - y_a) * e2y + (z0 - z_a) * e2z;
+        float t_x1 = (x1 - x_a) * e1x + (y1 - y_a) * e1y + (z1 - z_a) * e1z;
+        float t_y1 = (x1 - x_a) * e2x + (y1 - y_a) * e2y + (z1 - z_a) * e2z;
+
+        // compute singed area
+        area_signed += t_x0 * t_y1 - t_x1 * t_y0;
+        Cx += (t_x0 + t_x1) * (t_x0 * t_y1 - t_x1 * t_y0);
+        Cy += (t_y0 + t_y1) * (t_x0 * t_y1 - t_x1 * t_y0);
+      }
+
+      // center point after transformed
+      area_signed /= 2;
+      Cx /= (6 * area_signed);
+      Cy /= (6 * area_signed);
+      
+      // center point in origin coordinate
+      cz = z_a + e1z * Cx + e2z * Cy;
+    }
+
+    if (cz - bottom_z > 0) {
+      volume_cluster += area_project * (cz - bottom_z);
+      // volume_cluster += area_project;
+    } else {}
+  }
+
+  // std::cout << "polygon num: " << lower_surface_polygons.size() << std::endl;
+  // std::cout << "area sum: " << volume_cluster << std::endl;
+  return volume_cluster;
+}
+
 //-----------------------------------------------------------------------------------------------------//
 
 int main (int argc, char** argv) {
@@ -720,59 +961,112 @@ int main (int argc, char** argv) {
   }
   std::vector<int> last_cluster_indices = compute_last_cluster(cloud_transformed, ground_normal_transformed, normals_transformed, outlier_indices, ground_z);
 
-  // extract indices and generate point clouds from different aspects
+  // -- extract indices and generate point clouds from different aspects
   std::vector<int> full_indices = compute_full_indices (cluster_indices, last_cluster_indices);
   pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_full_indices (new pcl::PointCloud<pcl::PointXYZ>(*cloud_transformed, full_indices));
 
-  std::vector<int> cluster_indices_no_ground = compute_indices_inlier_no_ground(clusters, plans_transformed, two_ground_plan);
-  std::vector<int> full_no_ground_indices = compute_full_indices (cluster_indices_no_ground, last_cluster_indices);
-  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_full_no_ground_indices (new pcl::PointCloud<pcl::PointXYZ>(*cloud_transformed, full_no_ground_indices));
+  // std::vector<int> cluster_indices_no_ground = compute_indices_inlier_no_ground(clusters, plans_transformed, two_ground_plan);
+  // std::vector<int> full_no_ground_indices = compute_full_indices (cluster_indices_no_ground, last_cluster_indices);
+  // pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_full_no_ground_indices (new pcl::PointCloud<pcl::PointXYZ>(*cloud_transformed, full_no_ground_indices));
 
-  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_stable_indices (new pcl::PointCloud<pcl::PointXYZ>(*cloud_transformed, cluster_indices));
-  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_stable_no_ground_indices (new pcl::PointCloud<pcl::PointXYZ>(*cloud_transformed, cluster_indices_no_ground));
+  // pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_stable_indices (new pcl::PointCloud<pcl::PointXYZ>(*cloud_transformed, cluster_indices));
+  // pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_stable_no_ground_indices (new pcl::PointCloud<pcl::PointXYZ>(*cloud_transformed, cluster_indices_no_ground));
 
-  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_last_indices (new pcl::PointCloud<pcl::PointXYZ>(*cloud_transformed, last_cluster_indices));
+  // pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_last_indices (new pcl::PointCloud<pcl::PointXYZ>(*cloud_transformed, last_cluster_indices));
 
   pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_main_pile (new pcl::PointCloud<pcl::PointXYZ>(*cloud_transformed, clusters[plans_transformed[main_pile_index_in_plans].index].indices));
-  pcl::PointCloud<pcl::Normal>::Ptr normal_main_pile (new pcl::PointCloud<pcl::Normal>(*normals_transformed, clusters[plans_transformed[main_pile_index_in_plans].index].indices));
+  // pcl::PointCloud<pcl::Normal>::Ptr normal_main_pile (new pcl::PointCloud<pcl::Normal>(*normals_transformed, clusters[plans_transformed[main_pile_index_in_plans].index].indices));
 
   std::vector<int> ground_indices(clusters[plans_transformed[0].index].indices);
   if (two_ground_plan) {
     ground_indices.insert(ground_indices.end(), clusters[plans_transformed[1].index].indices.begin(), clusters[plans_transformed[1].index].indices.end());
   }
   pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_ground (new pcl::PointCloud<pcl::PointXYZ>(*cloud_transformed, ground_indices));
+  
 
-  // construct triangle
-  // pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_hull (new pcl::PointCloud<pcl::PointXYZ>);
-  // // std::vector< pcl::Vertices > polygons;
+  // -- construct triangle for the full dataset
+  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_hull (new pcl::PointCloud<pcl::PointXYZ>);
+  // std::vector< pcl::Vertices > polygons;
   // pcl::ConcaveHull<pcl::PointXYZ> chull;
-  // chull.setInputCloud(cloud_ground);
-  // chull.setAlpha(3.0);
-  // // chull.setDimension(2);
-  // pcl::PolygonMesh triangles;
-  // chull.reconstruct(triangles);
-  // // pcl::io::saveVTKFile ("mesh_ground_chull.3.0.vtk", triangles);
-  // chull.reconstruct (*cloud_hull);
+  pcl::ConcaveHull<pcl::PointXYZ> chull;
 
+  chull.setInputCloud(cloud_full_indices);
+  chull.setAlpha(3.0);
+  chull.setKeepInformation(true);
+  // chull.setDimension(2);
+  pcl::PolygonMesh triangles;
+  chull.reconstruct(triangles);
+  pcl::io::saveVTKFile ("mesh_full_chull.3.0.vtk", triangles);
+  chull.reconstruct (*cloud_hull);
 
-  // compute the center
+  // pcl::PointCloud <pcl::Normal>::Ptr normal_hull =  compute_normals(tree, cloud_hull);
+  // pcl::io::savePCDFileASCII ("normal_hull.pcd", *normal_hull);
+
+  // -- compute volume
+  // 1. generate vector of indices for clusters to be calculated
+  std::vector< std::vector<int> > clusters4volume;
+  
+  int start = 1;
+  if (two_ground_plan) {
+    start = 2;
+  }
+
+  for (int i = start; i < plans_transformed.size(); i++) {
+    clusters4volume.push_back(clusters[plans_transformed[i].index].indices);
+  }
+  clusters4volume.push_back(last_cluster_indices);
+
+  // 2. use minimum z of main pile as the the base for calculating volume
+  std::vector<float> main_pile_zs;
+  for (int i=0; i < cloud_main_pile->size(); i++) {
+    main_pile_zs.push_back(cloud_main_pile->points[i].z);
+  }
+  float bottom_z = *std::min_element(main_pile_zs.begin(), main_pile_zs.end());
+
+  // 3. compute the volume
+  float volume = 0;
+  for (int i=0; i < clusters4volume.size(); i++) {
+    // std::cout << "cluster: " << i << std::endl;
+    volume += compute_volume_4_cluster(cloud_transformed,
+                                       clusters4volume[i],
+                                       bottom_z);
+  }
+
+  // -- compute the radius for making up the missing volume
   Circle ground_circle = compute_center(cloud_transformed, ground_indices);
-  std::cout << "center x: " << ground_circle.cx << std::endl;
-  std::cout << "center y: " << ground_circle.cy << std::endl;
+  // std::cout << "center x: " << ground_circle.cx << std::endl;
+  // std::cout << "center y: " << ground_circle.cy << std::endl;
   std::cout << "ground circle r: " << ground_circle.r << std::endl;
 
-  float r_main_pile =  compute_r_main_pile(cloud_main_pile, ground_circle);
-  std::cout << "main pile r: " << r_main_pile << std::endl;
+  float r_ridge =  compute_r_main_pile(cloud_main_pile, ground_circle);
+  float width_cross_section_main_pile = r_ridge - ground_circle.r;
+  std::cout << "width of cross section of pile: " << width_cross_section_main_pile << std::endl;
 
+  float volume_back = ((2 * ground_circle.r + 3 * width_cross_section_main_pile) /
+                       (2 * ground_circle.r + width_cross_section_main_pile) *
+                        volume);
+  float volume_with_back = volume + volume_back;
+  std::cout << "volum form point cloud: " << volume << std::endl;
+  std::cout << "volum back: " << volume_back << std::endl;
+  std::cout << "volum with back: " << volume_with_back << std::endl;
+  ofstream result_file;
+  result_file.open ("result.csv");
+  result_file << "angle_pose,volum_from_point_cloud,volume_back,volume_with_back\n";
+  result_file << (std::to_string(angle_repose) + "," + std::to_string(volume) +
+                  "," + std::to_string(volume_back) + "," +
+                  std::to_string(volume_with_back) + "\n");
+  result_file.close();
 
-  // interactive 3-D plot
-  // for plot the center
+  // -- interactive 3-D plot
+  // plot(cloud_hull);
+  // 1. for plot the center
   // (*cloud_main_pile).insert( (*cloud_main_pile).end(), 1, pcl::PointXYZ(ground_circle.cx, ground_circle.cy, ground_z) );
   // plot(cloud_main_pile);
 
-  // plot the main pile
+  // 2. plot the main pile
   // plot(cloud_main_pile);
 
+  // 3. other
   // plot(cloud_full_indices);
   // plot(cloud_stable_indices);
   // plot(cloud_last_indices);
