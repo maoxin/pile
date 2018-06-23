@@ -14,6 +14,7 @@
 #include <pcl/filters/statistical_outlier_removal.h>
 #include <pcl/common/transforms.h>
 #include <pcl/surface/mls.h>
+#include <pcl/filters/passthrough.h>
 
 #include <pcl/io/vtk_io.h>
 #include <pcl/surface/gp3.h>
@@ -88,7 +89,8 @@ class Point {
 float median(std::vector<float> vec);
 int plot(pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud);
 int plot(pcl::RegionGrowing<pcl::PointXYZ, pcl::Normal> &reg);
-int remove_outliers(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud);
+int remove_outliers(pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud,
+                    float bottom_z, float top_z);
 pcl::PointCloud <pcl::Normal>::Ptr compute_normals(const pcl::search::Search<pcl::PointXYZ>::Ptr &tree,
                                                    const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud);
 pcl::RegionGrowing<pcl::PointXYZ, pcl::Normal> compute_reg(const pcl::search::Search<pcl::PointXYZ>::Ptr &tree,
@@ -214,11 +216,18 @@ int plot(pcl::RegionGrowing<pcl::PointXYZ, pcl::Normal> &reg) {
   return 0;
 }
 
-int remove_outliers(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud) {
+int remove_outliers(pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud,
+                    float bottom_z, float top_z) {
+  // pcl::PassThrough<pcl::PointXYZ> pass;
+  // pass.setInputCloud (cloud);
+  // pass.setFilterFieldName ("z");
+  // pass.setFilterLimits (bottom_z + 10, top_z);
+  // pass.filter (*cloud);
+
   // pcl::IndicesPtr indices (new std::vector <int>);
   pcl::StatisticalOutlierRemoval<pcl::PointXYZ> sor;
   sor.setInputCloud (cloud);
-  sor.setMeanK (50);
+  sor.setMeanK (200);
   sor.setStddevMulThresh (2.0);
   // sor.filter (*indices);
   sor.filter(*cloud);
@@ -1044,13 +1053,14 @@ int main (int argc, char** argv) {
     return -1;
   }
 
-  // std::vector<float> z;
-  // for (int i=0; i < cloud->size(); i++) {
-  //   z.push_back(cloud->points[i].z);
-  // }
+  std::vector<float> z;
+  for (int i=0; i < cloud->size(); i++) {
+    z.push_back(cloud->points[i].z);
+  }
 
-  // float min_z = *std::min_element(z.begin(), z.end());
-  // std::cout << min_z << std::endl;
+  float bottom_z = *std::min_element(z.begin(), z.end());
+  float top_z = *std::max_element(z.begin(), z.end());
+  // std::cout << "max_height: " << max_z - min_z << std::endl;
   // std::vector<int> idx;
   // int s = cloud->size();
   // for (int i=0; i < s; i++) {
@@ -1063,7 +1073,11 @@ int main (int argc, char** argv) {
   // remove walls and outliers
   pcl::search::Search<pcl::PointXYZ>::Ptr tree = boost::shared_ptr<pcl::search::Search<pcl::PointXYZ>> (new pcl::search::KdTree<pcl::PointXYZ>);
   pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_no_wall = remove_wall(cloud);
-  remove_outliers(cloud_no_wall);
+  remove_outliers(cloud_no_wall, bottom_z, top_z);
+  int s = cloud_no_wall->size();
+  for (int i=0; i < s; i++) {
+    (*cloud_no_wall).insert( (*cloud_no_wall).end(), 1, pcl::PointXYZ(cloud_no_wall->points[i].x, cloud_no_wall->points[i].y, bottom_z) );
+  }
   plot(cloud_no_wall);
   
   // pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_remain(new pcl::PointCloud<pcl::PointXYZ>(*cloud, remain_index));
