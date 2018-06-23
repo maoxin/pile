@@ -1,5 +1,6 @@
 #include <iostream>
 #include <vector>
+#include <set>
 #include <cmath>
 
 #include <pcl/point_types.h>
@@ -157,6 +158,9 @@ float x_median(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud,
 float y_median(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud,
                const std::vector<int> &indices);
 bool is_two_front(const std::vector<Plan> plans);
+int transform2cylinder(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud,
+                       float cx, float cy);
+pcl::PointCloud<pcl::PointXYZ>::Ptr remove_wall(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud);
 
 //-----------------------------------------------------------------------------------------------------//
 
@@ -215,7 +219,7 @@ int remove_outliers(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud) {
   pcl::StatisticalOutlierRemoval<pcl::PointXYZ> sor;
   sor.setInputCloud (cloud);
   sor.setMeanK (50);
-  sor.setStddevMulThresh (3.0);
+  sor.setStddevMulThresh (2.0);
   // sor.filter (*indices);
   sor.filter(*cloud);
 
@@ -940,6 +944,86 @@ float compute_volume_4_cluster(const pcl::PointCloud <pcl::PointXYZ>::Ptr &cloud
   return volume_cluster;
 }
 
+int transform2cylinder(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud,
+                       float cx, float cy) {
+  ofstream file;
+  file.open ("cylinder.csv");
+  file << "theta,rho,z\n";
+
+  for (int i=0; i < cloud->size(); i++) {
+    float theta = std::atan(cloud->points[i].y / cloud->points[i].x);
+    float rho = std::sqrt(std::pow(cloud->points[i].x, 2) + std::pow(cloud->points[i].y, 2));
+    float z = cloud->points[i].z;
+    file << (std::to_string(theta) + "," + std::to_string(rho) +
+             "," + std::to_string(z) + "\n");
+  }
+  
+  file.close();
+
+  return 0;
+}
+
+pcl::PointCloud<pcl::PointXYZ>::Ptr remove_wall(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud) {
+
+  float radius = 0.5;
+  pcl::KdTreeFLANN<pcl::PointXYZ> kdtree;
+
+  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud2filter(new pcl::PointCloud<pcl::PointXYZ>(*cloud));
+
+  std::vector<float> vec_x, vec_y;
+  for (int i=0; i < cloud2filter->size(); i++) {
+    cloud2filter->points[i].z = 0;
+    vec_x.push_back(cloud2filter->points[i].x);
+    vec_y.push_back(cloud2filter->points[i].y);
+  }
+  kdtree.setInputCloud(cloud2filter);
+
+  float max_x = *std::max_element(vec_x.begin(), vec_x.end());
+  float min_x = *std::min_element(vec_x.begin(), vec_x.end());
+  float max_y = *std::max_element(vec_y.begin(), vec_y.end());
+  float min_y = *std::min_element(vec_y.begin(), vec_y.end());
+
+  std::vector<int> remain_index;
+  ofstream result_file;
+  result_file.open ("z_desnsity.csv");
+  result_file << "x,y,diff_z\n";
+
+  for (float i=min_x; i <= max_x; i++) {
+    for (float j=min_y; j <= max_y; j++) {
+      std::vector<int> pointIdxRadiusSearch;
+      std::vector<float> pointRadiusSquaredDistance;
+
+      pcl::PointXYZ searchPoint;
+      searchPoint.x = i;
+      searchPoint.y = j;
+      searchPoint.z = 0;
+
+      if ( kdtree.radiusSearch (searchPoint, radius, pointIdxRadiusSearch, pointRadiusSquaredDistance) > 0 ) {
+        std::vector<float> vec_z;
+        for (int m=0; m < pointIdxRadiusSearch.size(); m++) {
+          vec_z.push_back(cloud->points[pointIdxRadiusSearch[m]].z);
+        }
+        float max_z = *std::max_element(vec_z.begin(), vec_z.end());
+        float min_z = *std::min_element(vec_z.begin(), vec_z.end());
+        result_file << (std::to_string(i) + "," + std::to_string(j) +
+                        "," + std::to_string(max_z-min_z) + "\n");
+        
+        if (max_z-min_z<2.5) {
+          remain_index.insert(remain_index.end(), pointIdxRadiusSearch.begin(), pointIdxRadiusSearch.end());
+        }
+      }
+    }
+  }
+  result_file.close();
+
+  std::set<int> s(remain_index.begin(), remain_index.end());
+  remain_index.assign(s.begin(), s.end());
+
+  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_no_wall (new pcl::PointCloud<pcl::PointXYZ>(*cloud, remain_index));
+
+  return cloud_no_wall;
+}
+
 //-----------------------------------------------------------------------------------------------------//
 
 int main (int argc, char** argv) {
@@ -952,15 +1036,13 @@ int main (int argc, char** argv) {
   }
 
 
-  // filter the outliers and smooth the surface
+  // smooth the surface
   smooth_cloud(origin_cloud);
   pcl::PointCloud<pcl::PointXYZ>::Ptr cloud (new pcl::PointCloud<pcl::PointXYZ>);
   if ( pcl::io::loadPCDFile <pcl::PointXYZ> ("mls.pcd", *cloud) == -1) {
     std::cout << "Cloud reading failed." << std::endl;
     return -1;
   }
-
-  remove_outliers(cloud);
 
   // std::vector<float> z;
   // for (int i=0; i < cloud->size(); i++) {
@@ -978,11 +1060,17 @@ int main (int argc, char** argv) {
   // plot(cloud);
   
 
-  // generate tree for search
+  // remove walls and outliers
   pcl::search::Search<pcl::PointXYZ>::Ptr tree = boost::shared_ptr<pcl::search::Search<pcl::PointXYZ>> (new pcl::search::KdTree<pcl::PointXYZ>);
+  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_no_wall = remove_wall(cloud);
+  remove_outliers(cloud_no_wall);
+  plot(cloud_no_wall);
+  
+  // pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_remain(new pcl::PointCloud<pcl::PointXYZ>(*cloud, remain_index));
+  // plot(cloud_remain);
 
   // compute normals
-  pcl::PointCloud <pcl::Normal>::Ptr normals = compute_normals(tree, cloud);
+  // pcl::PointCloud <pcl::Normal>::Ptr normals = compute_normals(tree, cloud);
 
   // std::vector<int> idx;
   // for (int i=0; i < normals->size(); i++) {
@@ -994,26 +1082,28 @@ int main (int argc, char** argv) {
   // pcl::PointCloud<pcl::PointXYZ>::Ptr cloud1 (new pcl::PointCloud<pcl::PointXYZ>(*cloud, idx));
   // plot(cloud1);
 
-  // segmentation
-  std::vector <pcl::PointIndices> clusters;
-  pcl::RegionGrowing<pcl::PointXYZ, pcl::Normal> reg = compute_reg(tree, cloud, normals, clusters);
+  // // segmentation
+  // std::vector <pcl::PointIndices> clusters;
+  // pcl::RegionGrowing<pcl::PointXYZ, pcl::Normal> reg = compute_reg(tree, cloud, normals, clusters);
 
-  // generate plan descriptor
-  // detect the front pile cluster (maybe there are two front pile plan)
-  std::vector<Plan> plans = compute_plans(cloud, clusters, normals);
-  // bool two_ground_plan = is_two_ground(plans);
-  bool two_front = is_two_front(plans);
-  std::vector<int> front_pile_indices(clusters[plans[0].index].indices);
-  // if (two_front) {
-  //   front_pile_indices.insert(front_pile_indices.end(), clusters[plans[1].index].indices.begin(), clusters[plans[1].index].indices.end());
-  // }
+  // // generate plan descriptor
+  // // detect the front pile cluster (maybe there are two front pile plan)
+  // std::vector<Plan> plans = compute_plans(cloud, clusters, normals);
+  // // bool two_ground_plan = is_two_ground(plans);
+  // bool two_front = is_two_front(plans);
+  // std::vector<int> front_pile_indices(clusters[plans[0].index].indices);
+  // // if (two_front) {
+  // //   front_pile_indices.insert(front_pile_indices.end(), clusters[plans[1].index].indices.begin(), clusters[plans[1].index].indices.end());
+  // // }
 
-  // -- compute the center of the pile
+  // // -- compute the center of the pile
 
-  Circle front_circle = compute_center(cloud, front_pile_indices);
-  std::cout << "center x: " << front_circle.cx << std::endl;
-  std::cout << "center y: " << front_circle.cy << std::endl;
-  std::cout << "ground circle r: " << front_circle.r << std::endl;
+  // Circle front_circle = compute_center(cloud, front_pile_indices);
+  // std::cout << "center x: " << front_circle.cx << std::endl;
+  // std::cout << "center y: " << front_circle.cy << std::endl;
+  // std::cout << "ground circle r: " << front_circle.r << std::endl;
+
+  // transform2cylinder(cloud, front_circle.cx, front_circle.cy);
 
   // pcl::PointCloud<pcl::PointXYZ>::Ptr cloud1 (new pcl::PointCloud<pcl::PointXYZ>(*cloud, front_pile_indices));
 
