@@ -100,8 +100,8 @@ class Point {
 float median(std::vector<float> vec);
 int plot(pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud);
 int plot(pcl::RegionGrowing<pcl::PointXYZ, pcl::Normal> &reg);
-int remove_outliers(pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud,
-                    float bottom_z, float top_z);
+pcl::PointCloud<pcl::PointXYZ>::Ptr remove_outliers(pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud,
+                                                    float bottom_z, float top_z);
 pcl::PointCloud <pcl::Normal>::Ptr compute_normals(const pcl::search::Search<pcl::PointXYZ>::Ptr &tree,
                                                    const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud);
 pcl::RegionGrowing<pcl::PointXYZ, pcl::Normal> compute_reg(const pcl::search::Search<pcl::PointXYZ>::Ptr &tree,
@@ -228,6 +228,8 @@ int plot(pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud) {
   while (!viewer.wasStopped ()) { // Display the visualiser until 'q' key is pressed
     viewer.spinOnce ();
   }
+
+  return 0;
 }
 
 int plot(pcl::RegionGrowing<pcl::PointXYZ, pcl::Normal> &reg) {
@@ -247,8 +249,8 @@ int plot(pcl::RegionGrowing<pcl::PointXYZ, pcl::Normal> &reg) {
   return 0;
 }
 
-int remove_outliers(pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud,
-                    float bottom_z, float top_z) {
+pcl::PointCloud<pcl::PointXYZ>::Ptr remove_outliers(pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud,
+                                                    float bottom_z, float top_z) {
   // pcl::PassThrough<pcl::PointXYZ> pass;
   // pass.setInputCloud (cloud);
   // pass.setFilterFieldName ("z");
@@ -256,14 +258,15 @@ int remove_outliers(pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud,
   // pass.filter (*cloud);
 
   // pcl::IndicesPtr indices (new std::vector <int>);
+  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_filtered (new pcl::PointCloud<pcl::PointXYZ>);
   pcl::StatisticalOutlierRemoval<pcl::PointXYZ> sor;
   sor.setInputCloud (cloud);
   sor.setMeanK (200);
   sor.setStddevMulThresh (2.0);
   // sor.filter (*indices);
-  sor.filter(*cloud);
+  sor.filter(*cloud_filtered);
 
-  return 0;
+  return cloud_filtered;
 }
 
 pcl::PointCloud <pcl::Normal>::Ptr compute_normals(const pcl::search::Search<pcl::PointXYZ>::Ptr &tree,
@@ -1737,7 +1740,7 @@ int main (int argc, char** argv) {
   // remove walls and outliers
   pcl::search::Search<pcl::PointXYZ>::Ptr tree = boost::shared_ptr<pcl::search::Search<pcl::PointXYZ>> (new pcl::search::KdTree<pcl::PointXYZ>);
   cloud = remove_wall(cloud);
-  remove_outliers(cloud, bottom_z, top_z);
+  cloud = remove_outliers(cloud, bottom_z, top_z);
   // int s = cloud_no_wall->size();
   // for (int i=0; i < s; i++) {
   //   (*cloud_no_wall).insert( (*cloud_no_wall).end(), 1, pcl::PointXYZ(cloud_no_wall->points[i].x, cloud_no_wall->points[i].y, bottom_z) );
