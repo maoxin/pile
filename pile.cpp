@@ -38,7 +38,7 @@ class Result {
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_final;
     float volume;
     
-    Result(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_final, float volume): cloud_final(cloud_final), volume(volume) {}
+    Result(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_final, float volume): cloud_final(cloud_final), volume(volume) {}
 };
 class Plan {
   public:
@@ -94,6 +94,14 @@ class Point {
     float x;
     float y;
     Point(float x, float y): x(x), y(y) {}
+};
+
+class PolygonRaster {
+  public:
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_polygon_raster;
+    std::vector<int> polygon_raster_idx;
+    PolygonRaster(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_polygon_raster, const std::vector<int> &polygon_raster_idx):
+      cloud_polygon_raster(cloud_polygon_raster), polygon_raster_idx(polygon_raster_idx) {}
 };
 
 // declare function
@@ -189,12 +197,15 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr refine_cloud(const pcl::PointCloud<pcl::Poin
                                                  bool ground);
 pcl::PointCloud<pcl::PointXYZ>::Ptr compute_upper_surface_cloud (const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_refine,
                                                                  const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_hull,
-                                                                 const pcl::PointCloud <pcl::PointXYZ>::Ptr &cloud_polygon_center,
+                                                                 const PolygonRaster &polygon_raster,
                                                                  const std::vector< pcl::Vertices> &polygons,
-                                                                 const pcl::KdTreeFLANN<pcl::PointXYZ> &kdtree,
-                                                                 float bottom_z);
+                                                                 float bottom_z,
+                                                                 float raster_size);
 Result compute_volume(const pcl::PointCloud <pcl::PointXYZ>::Ptr &cloud_refine,
-                      float bottom_z);
+                      float bottom_z, float raster_size);
+PolygonRaster compute_polygon_raster(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_hull,
+                                     const std::vector< pcl::Vertices > &polygons,
+                                     float raster_size);
 //-----------------------------------------------------------------------------------------------------//
 
 // utinity
@@ -989,10 +1000,10 @@ float compute_volume_4_cluster(const pcl::PointCloud <pcl::PointXYZ>::Ptr &cloud
 
 pcl::PointCloud<pcl::PointXYZ>::Ptr compute_upper_surface_cloud (const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_refine,
                                                                  const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_hull,
-                                                                 const pcl::PointCloud <pcl::PointXYZ>::Ptr &cloud_polygon_center,
+                                                                 const PolygonRaster &polygon_raster,
                                                                  const std::vector< pcl::Vertices> &polygons,
-                                                                 const pcl::KdTreeFLANN<pcl::PointXYZ> &kdtree,
-                                                                 float bottom_z) {
+                                                                 float bottom_z,
+                                                                 float raster_size=0.2) {
   std::vector<float> vec_x, vec_y;
   for (int i=0; i < cloud_refine->size(); i++) {
     vec_x.push_back(cloud_refine->points[i].x);
@@ -1004,18 +1015,20 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr compute_upper_surface_cloud (const pcl::Poin
   float max_y = *std::max_element(vec_y.begin(), vec_y.end());
   float min_y = *std::min_element(vec_y.begin(), vec_y.end());
   
+  pcl::KdTreeFLANN<pcl::PointXYZ> kdtree;
+  kdtree.setInputCloud(polygon_raster.cloud_polygon_raster);
   // int K = 1500;
   // std::vector<int> pointIdxNKNSearch(K);
   // std::vector<float> pointNKNSquaredDistance(K);
-  float radius = 1;
+  float radius = raster_size;
 
   std::vector< pcl::Vertices> polygons2use;
   pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_final (new pcl::PointCloud<pcl::PointXYZ>);
   float volume_simple2 = 0;
   
   // for (int i=0; i < polygons.size(); i++) {
-  for (float i=min_x; i <= max_x; i++) {
-    for (float j=min_y; j <= max_y; j++) {
+  for (float i=min_x; i <= max_x; i+=raster_size) {
+    for (float j=min_y; j <= max_y; j+=raster_size) {
       std::vector<int> pointIdxNKNSearch;
       std::vector<float> pointNKNSquaredDistance;
       
@@ -1030,20 +1043,56 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr compute_upper_surface_cloud (const pcl::Poin
 
       // if ( kdtree.nearestKSearch(searchPoint, K, pointIdxNKNSearch, pointNKNSquaredDistance) > 0 ) {
       if ( kdtree.radiusSearch(searchPoint, radius, pointIdxNKNSearch, pointNKNSquaredDistance) > 0 ) {
+        std::vector<int> polygon_idx2use;
         for (int t = 0; t < pointIdxNKNSearch.size (); t++) {
-          Point v1 = Point(cloud_hull->points[polygons[pointIdxNKNSearch[t]].vertices[0]].x,
-                           cloud_hull->points[polygons[pointIdxNKNSearch[t]].vertices[0]].y);
-          Point v2 = Point(cloud_hull->points[polygons[pointIdxNKNSearch[t]].vertices[1]].x,
-                           cloud_hull->points[polygons[pointIdxNKNSearch[t]].vertices[1]].y);
-          Point v3 = Point(cloud_hull->points[polygons[pointIdxNKNSearch[t]].vertices[2]].x,
-                           cloud_hull->points[polygons[pointIdxNKNSearch[t]].vertices[2]].y);
+          polygon_idx2use.push_back(polygon_raster.polygon_raster_idx[pointIdxNKNSearch[t]]);
+        }
+        std::set<int> s(polygon_idx2use.begin(), polygon_idx2use.end());
+        polygon_idx2use.assign(s.begin(), s.end());
+
+
+        for (int t=0; t < polygon_idx2use.size(); t++) {
+          Point v1 = Point(cloud_hull->points[polygons[polygon_idx2use[t]].vertices[0]].x,
+                           cloud_hull->points[polygons[polygon_idx2use[t]].vertices[0]].y);
+          Point v2 = Point(cloud_hull->points[polygons[polygon_idx2use[t]].vertices[1]].x,
+                           cloud_hull->points[polygons[polygon_idx2use[t]].vertices[1]].y);
+          Point v3 = Point(cloud_hull->points[polygons[polygon_idx2use[t]].vertices[2]].x,
+                           cloud_hull->points[polygons[polygon_idx2use[t]].vertices[2]].y);
           if (PointInTriangle(pt, v1, v2, v3)) {
-            float polygon_z = (cloud_hull->points[polygons[pointIdxNKNSearch[t]].vertices[0]].z +
-                               cloud_hull->points[polygons[pointIdxNKNSearch[t]].vertices[1]].z +
-                               cloud_hull->points[polygons[pointIdxNKNSearch[t]].vertices[2]].z ) / 3;
+            Eigen::Vector3f p0;
+            Eigen::Vector3f p1;
+            Eigen::Vector3f p2;
+
+            float x0 = cloud_hull->points[polygons[polygon_idx2use[t]].vertices[0]].x;
+            float y0 = cloud_hull->points[polygons[polygon_idx2use[t]].vertices[0]].y;
+            float z0 = cloud_hull->points[polygons[polygon_idx2use[t]].vertices[0]].z;
+            float x1 = cloud_hull->points[polygons[polygon_idx2use[t]].vertices[1]].x;
+            float y1 = cloud_hull->points[polygons[polygon_idx2use[t]].vertices[1]].y;
+            float z1 = cloud_hull->points[polygons[polygon_idx2use[t]].vertices[1]].z;
+            float x2 = cloud_hull->points[polygons[polygon_idx2use[t]].vertices[2]].x;
+            float y2 = cloud_hull->points[polygons[polygon_idx2use[t]].vertices[2]].y;
+            float z2 = cloud_hull->points[polygons[polygon_idx2use[t]].vertices[2]].z;
+
+            p0 << x0, y0, z0;
+            p1 << x1, y1, z1;
+            p2 << x2, y2, z2;
+
+            Eigen::Vector3f normal_polygon = (p1 - p0).cross(p2 - p0);
+            float nx = normal_polygon[0];
+            float ny = normal_polygon[1];
+            float nz = normal_polygon[2];
+            float length = std::sqrt(std::pow(nx, 2) + std::pow(ny, 2) + std::pow(nz, 2));
+            nx /= length;
+            ny /= length;
+            nz /= length;
+
+            float polygon_z = -1000;
+            if (std::abs(nz) >= 0.3) {
+              polygon_z  = (nx * x0 + ny * y0 + nz * z0 - nx * i - ny * j) / nz;
+            }
             if ((polygon_z > max_z) & (polygon_z > bottom_z)) {
               max_z = polygon_z;
-              remain_idx = pointIdxNKNSearch[t];
+              remain_idx = polygon_idx2use[t];
             }
           }
         }
@@ -1064,7 +1113,7 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr compute_upper_surface_cloud (const pcl::Poin
 }
 
 Result compute_volume(const pcl::PointCloud <pcl::PointXYZ>::Ptr &cloud_refine,
-                      float bottom_z) {
+                      float bottom_z, float raster_size=0.2) {
 
   pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_hull (new pcl::PointCloud<pcl::PointXYZ>);
   std::vector< pcl::Vertices > polygons;
@@ -1082,15 +1131,14 @@ Result compute_volume(const pcl::PointCloud <pcl::PointXYZ>::Ptr &cloud_refine,
   pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_final;
   if (polygons[0].vertices.size() == 3) {
     // 1. construct center point cloud for polygons
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_polygon_center = compute_center_cloud_4_polygons(cloud_hull, polygons);
+    // pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_polygon_center = compute_center_cloud_4_polygons(cloud_hull, polygons);
+    PolygonRaster polygon_raster =  compute_polygon_raster(cloud_hull, polygons, raster_size);
 
     // 2. just remain those in the lower surface (use kdtree to fast the process)
-    pcl::KdTreeFLANN<pcl::PointXYZ> kdtree;
-    kdtree.setInputCloud(cloud_polygon_center);
 
     cloud_final = compute_upper_surface_cloud (cloud_refine, cloud_hull, 
-                                               cloud_polygon_center, polygons,
-                                               kdtree, bottom_z);
+                                               polygon_raster, polygons, bottom_z, raster_size);
+
     // upper_surface_polygons = polygons;
   } else {
     for (int i=0; i < cloud_refine->size(); i++) {
@@ -1103,7 +1151,7 @@ Result compute_volume(const pcl::PointCloud <pcl::PointXYZ>::Ptr &cloud_refine,
   // --compute volume under the upper polygons
   float volume = 0;
   for (int i = 0; i< cloud_final->size(); i++) {
-    volume += cloud_final->points[i].z - bottom_z;
+    volume += std::pow(raster_size, 2) * (cloud_final->points[i].z - bottom_z);
   }
 
   // float volume = 0;
@@ -1205,6 +1253,70 @@ Result compute_volume(const pcl::PointCloud <pcl::PointXYZ>::Ptr &cloud_refine,
   return Result(cloud_final, volume);
 }
 
+PolygonRaster compute_polygon_raster(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_hull,
+                                     const std::vector< pcl::Vertices > &polygons,
+                                     float raster_size=0.2) {
+  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_polygon_raster (new pcl::PointCloud<pcl::PointXYZ>);
+
+  std::vector<float> vec_rx;
+  std::vector<float> vec_ry;
+  std::vector<int> vec_idx;
+
+  for (int i=0; i < polygons.size(); i++) { 
+    std::vector<float> vec_vx;
+    std::vector<float> vec_vy;
+
+    for (int j=0; j < polygons[i].vertices.size(); j++) {
+      vec_vx.push_back(cloud_hull->points[polygons[i].vertices[j]].x);
+      vec_vy.push_back(cloud_hull->points[polygons[i].vertices[j]].y);
+    }
+
+    Point v1 = Point(vec_vx[0], vec_vy[0]);
+    Point v2 = Point(vec_vx[1], vec_vy[1]);
+    Point v3 = Point(vec_vx[2], vec_vy[2]);
+
+
+    float min_x = *std::min_element(vec_vx.begin(), vec_vx.end());
+    float max_x = *std::max_element(vec_vx.begin(), vec_vx.end());
+    float min_y = *std::min_element(vec_vy.begin(), vec_vy.end());
+    float max_y = *std::max_element(vec_vy.begin(), vec_vy.end());
+
+    float start_x = min_x;
+    float start_y = min_y;
+    if (max_x - min_x <= raster_size) {
+      start_x = (min_x + max_x) / 2;
+    }
+    if (max_y - min_y <= raster_size) {
+      start_y = (min_y + max_y) / 2;
+    }
+
+    for (float rx = start_x; rx <= max_x; rx += raster_size) {
+      for (float ry = start_y; ry <= max_y; ry += raster_size) {
+        Point pt(rx, ry);
+        if (PointInTriangle(pt, v1, v2, v3)) {
+          vec_rx.push_back(rx);
+          vec_ry.push_back(ry);
+          vec_idx.push_back(i);
+        }
+      }
+    }
+  }
+
+  cloud_polygon_raster->width = vec_idx.size();
+  cloud_polygon_raster->height = 1;
+  cloud_polygon_raster->points.resize(vec_idx.size());
+
+  for (int i=0; i<cloud_polygon_raster->size(); i++) {
+    cloud_polygon_raster->points[i].x = vec_rx[i];
+    cloud_polygon_raster->points[i].y = vec_ry[i];
+    cloud_polygon_raster->points[i].z = 0;
+  }
+
+  PolygonRaster polygon_raster(cloud_polygon_raster, vec_idx);
+
+  return polygon_raster;
+}
+
 pcl::PointCloud<pcl::PointXYZ>::Ptr transform2cylinder(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud,
                                                        float cx, float cy) {
   // ofstream file;
@@ -1213,6 +1325,7 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr transform2cylinder(const pcl::PointCloud<pcl
 
   pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_cylinder(new pcl::PointCloud<pcl::PointXYZ>);
   cloud_cylinder->width = cloud->width;
+  cloud_cylinder->height = 1;
   cloud_cylinder->points.resize(cloud->size());
 
   for (int i=0; i < cloud->size(); i++) {
