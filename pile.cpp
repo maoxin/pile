@@ -1059,9 +1059,37 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr compute_upper_surface_cloud (const pcl::Poin
           Point v3 = Point(cloud_hull->points[polygons[polygon_idx2use[t]].vertices[2]].x,
                            cloud_hull->points[polygons[polygon_idx2use[t]].vertices[2]].y);
           if (PointInTriangle(pt, v1, v2, v3)) {
-            float polygon_z = (cloud_hull->points[polygons[polygon_idx2use[t]].vertices[0]].z +
-                               cloud_hull->points[polygons[polygon_idx2use[t]].vertices[1]].z +
-                               cloud_hull->points[polygons[polygon_idx2use[t]].vertices[2]].z ) / 3;
+            Eigen::Vector3f p0;
+            Eigen::Vector3f p1;
+            Eigen::Vector3f p2;
+
+            float x0 = cloud_hull->points[polygons[polygon_idx2use[t]].vertices[0]].x;
+            float y0 = cloud_hull->points[polygons[polygon_idx2use[t]].vertices[0]].y;
+            float z0 = cloud_hull->points[polygons[polygon_idx2use[t]].vertices[0]].z;
+            float x1 = cloud_hull->points[polygons[polygon_idx2use[t]].vertices[1]].x;
+            float y1 = cloud_hull->points[polygons[polygon_idx2use[t]].vertices[1]].y;
+            float z1 = cloud_hull->points[polygons[polygon_idx2use[t]].vertices[1]].z;
+            float x2 = cloud_hull->points[polygons[polygon_idx2use[t]].vertices[2]].x;
+            float y2 = cloud_hull->points[polygons[polygon_idx2use[t]].vertices[2]].y;
+            float z2 = cloud_hull->points[polygons[polygon_idx2use[t]].vertices[2]].z;
+
+            p0 << x0, y0, z0;
+            p1 << x1, y1, z1;
+            p2 << x2, y2, z2;
+
+            Eigen::Vector3f normal_polygon = (p1 - p0).cross(p2 - p0);
+            float nx = normal_polygon[0];
+            float ny = normal_polygon[1];
+            float nz = normal_polygon[2];
+            float length = std::sqrt(std::pow(nx, 2) + std::pow(ny, 2) + std::pow(nz, 2));
+            nx /= length;
+            ny /= length;
+            nz /= length;
+
+            float polygon_z = -1000;
+            if (std::abs(nz) >= 0.3) {
+              polygon_z  = (nx * x0 + ny * y0 + nz * z0 - nx * i - ny * j) / nz;
+            }
             if ((polygon_z > max_z) & (polygon_z > bottom_z)) {
               max_z = polygon_z;
               remain_idx = polygon_idx2use[t];
@@ -1103,13 +1131,13 @@ Result compute_volume(const pcl::PointCloud <pcl::PointXYZ>::Ptr &cloud_refine,
   pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_final;
   if (polygons[0].vertices.size() == 3) {
     // 1. construct center point cloud for polygons
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_polygon_center = compute_center_cloud_4_polygons(cloud_hull, polygons);
+    // pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_polygon_center = compute_center_cloud_4_polygons(cloud_hull, polygons);
     PolygonRaster polygon_raster =  compute_polygon_raster(cloud_hull, polygons, raster_size);
 
     // 2. just remain those in the lower surface (use kdtree to fast the process)
 
     cloud_final = compute_upper_surface_cloud (cloud_refine, cloud_hull, 
-                                               polygon_raster, polygons, bottom_z);
+                                               polygon_raster, polygons, bottom_z, raster_size);
 
     // upper_surface_polygons = polygons;
   } else {
