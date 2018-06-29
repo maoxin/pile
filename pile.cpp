@@ -20,6 +20,8 @@
 #include <pcl/kdtree/kdtree_flann.h>
 #include <pcl/surface/concave_hull.h>
 
+#define  RD	60
+
 // declare class
 class RemoveWallResult {
   public:
@@ -122,6 +124,8 @@ PolygonRaster compute_polygon_raster(const pcl::PointCloud<pcl::PointXYZ>::Ptr &
                                      float raster_size);
 std::vector<int> compute_edge(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_cylinder);
 EdgeInfo auto_compute_edge(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud);
+std::vector<float> slice(float le, float re, int slice_num);
+std::vector<float> set_le_re(float le, float re, int i, int slice_num);
 //-----------------------------------------------------------------------------------------------------//
 
 // utinity
@@ -319,6 +323,11 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr compute_upper_surface_cloud (const pcl::Poin
   // for (int i=0; i < polygons.size(); i++) {
   for (float i=min_x; i <= max_x; i+=raster_size) {
     for (float j=min_y; j <= max_y; j+=raster_size) {
+      
+      if (std::pow(i, 2) + std::pow(j, 2) > std::pow(RD, 2)) {
+        continue;
+      } // wall
+
       std::vector<int> pointIdxNKNSearch;
       std::vector<float> pointNKNSquaredDistance;
       
@@ -426,7 +435,7 @@ Result compute_volume(const pcl::PointCloud <pcl::PointXYZ>::Ptr &cloud_refine,
 
   } else {
     for (int i=0; i < cloud_refine->size(); i++) {
-      if (cloud_refine->points[i].z > (bottom_z)) {
+      if (cloud_refine->points[i].z > (bottom_z) && ((std::pow(cloud_refine->points[i].x, 2) + std::pow(cloud_refine->points[i].y, 2)) <= std::pow(RD, 2))) {
         (*cloud_final).insert( (*cloud_final).end(), 1, cloud_refine->points[i] );
       }
     }
@@ -648,7 +657,45 @@ std::vector<int> compute_edge(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_c
   return edge_idx;
 }
 
+std::vector<float> slice(float le, float re, int slice_num=8) {
+  std::vector<float> vec_chosen_element;
+  float step = (re - le) / slice_num;
+  vec_chosen_element.push_back(le + step / 2);
+
+  while (true) {
+    float new_element = vec_chosen_element.back() + step;
+
+    if (new_element <= re) {
+      vec_chosen_element.push_back(new_element);
+    } else {
+      break;
+    }
+  }
+
+  return vec_chosen_element;
+}
+
+std::vector<float> set_le_re(float le, float re, int i, int slice_num=8) {
+  float step = (re - le) / slice_num;
+
+  float new_le = le + step * i;
+  float new_re = new_le + step;
+
+  std::vector<float> vec_new_le_re;
+  vec_new_le_re.push_back(new_le);
+  vec_new_le_re.push_back(new_re);
+
+  return vec_new_le_re;
+}
+
 EdgeInfo auto_compute_edge(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud) {
+  int selected_c_idx;
+  float cx;
+  float cy;
+  std::vector<int> edge_idx;
+  std::vector<int> back_idx;
+  std::vector<int> far_point_idx;
+  
   std::vector<float> vec_x;
   std::vector<float> vec_y;
   for (int i=0; i<cloud->size(); i++) {
@@ -660,126 +707,164 @@ EdgeInfo auto_compute_edge(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud) {
   float min_y = *std::min_element(vec_y.begin(), vec_y.end());
   float max_y = *std::max_element(vec_y.begin(), vec_y.end());
 
-  std::vector<float> vec_r_std;
-  std::vector<std::vector<int>> vec_edge_idx;
-  std::vector<std::vector<int>> vec_back_idx;
-  std::vector<std::vector<int>> vec_far_point_idx;
-  std::vector<float> vec_cx;
-  std::vector<float> vec_cy;
-  for (float cx=min_x; cx <= max_x; cx += 2.5) {
-    for (float cy=min_y; cy <= max_y; cy += 2.5) {
-  // for (float cx = 4.42433; cx <= 4.42433 + 2.5; cx += 2.5) {
-    // for (float cy = 34.1356; cy <= 34.1356 + 2.5; cy += 2.5) {
-      vec_cx.push_back(cx);
-      vec_cy.push_back(cy);
-      std::vector<float> vec_r;
+  float min_cell_size = 2.5;
 
-      pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_cylinder = transform2cylinder(cloud, cx, cy);
+  float lx = min_x;
+  float rx = max_x;
+  float ly = min_y;
+  float ry = max_y;
 
-      std::vector<int> edge_idx;
-      std::vector<int> back_idx;
-      std::vector<int> far_point_idx;
-      pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_theta (new pcl::PointCloud<pcl::PointXYZ>(*cloud_cylinder));
+  float min_r_std = 99999;
+  int slice_num = 8;
+  while ((rx - lx >= min_cell_size) && (ry - ly >= min_cell_size)) {
+    std::vector<float> vec_chosen_x = slice(lx, rx, slice_num);
+    std::vector<float> vec_chosen_y = slice(ly, ry, slice_num);
 
-      std::vector<float> vec_theta;
-      for (int i=0; i < cloud_theta->size(); i++) {
-        cloud_theta->points[i].y = 0;
-        cloud_theta->points[i].z = 0;
+    std::vector<float> vec_r_std;
+    std::vector<std::vector<int>> vec_edge_idx;
+    std::vector<std::vector<int>> vec_back_idx;
+    std::vector<std::vector<int>> vec_far_point_idx;
+    std::vector<float> vec_cx;
+    std::vector<float> vec_cy;
 
-        vec_theta.push_back(cloud_theta->points[i].x);
-      }
+    std::vector<int> vec_ix;
+    std::vector<int> vec_iy;
 
-      float min_theta = *std::min_element(vec_theta.begin(), vec_theta.end());
-      float max_theta = *std::max_element(vec_theta.begin(), vec_theta.end());
+    for (int icx=0; icx <= vec_chosen_x.size(); icx++) {
+      for (int icy=0; icy <= vec_chosen_y.size(); icy++) {
+        float cx = vec_chosen_x[icx];
+        float cy = vec_chosen_y[icy];
 
-      pcl::KdTreeFLANN<pcl::PointXYZ> kdtree;
-      kdtree.setInputCloud(cloud_theta);
-      float radius = 0.5;
+        vec_ix.push_back(icx);
+        vec_iy.push_back(icy);
 
-      for (float t=min_theta; t<max_theta; t++) {
-        std::vector<int> pointIdxRadiusSearch;
-        std::vector<float> pointRadiusSquaredDistance;
+        vec_cx.push_back(cx);
+        vec_cy.push_back(cy);
+        std::vector<float> vec_r;
 
-        pcl::PointXYZ searchPoint;
-        searchPoint.x = t;
-        searchPoint.y = 0;
-        searchPoint.z = 0;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_cylinder = transform2cylinder(cloud, cx, cy);
 
-        if ( kdtree.radiusSearch (searchPoint, radius, pointIdxRadiusSearch, pointRadiusSquaredDistance) > 0 ) {
-          std::vector<PointPotentialEdge> PPEs;
-          for (int i=0; i<pointIdxRadiusSearch.size(); i++) {
-            int ppe_idx = pointIdxRadiusSearch[i];
-            float ppe_rho = cloud_cylinder->points[ppe_idx].y;
-            float ppe_z = cloud_cylinder->points[ppe_idx].z;
-            PointPotentialEdge ppe(ppe_idx, ppe_rho, ppe_z);
-            PPEs.push_back(ppe);
-          }
-          std::sort(PPEs.begin(), PPEs.end(), ByRhoPPE());
+        std::vector<int> edge_idx;
+        std::vector<int> back_idx;
+        std::vector<int> far_point_idx;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_theta (new pcl::PointCloud<pcl::PointXYZ>(*cloud_cylinder));
 
-          float rho_start = PPEs[0].rho;
-          float z_start = PPEs[0].z;
-          float rho_end = PPEs.back().rho;
-          float z_end = PPEs.back().z;
+        std::vector<float> vec_theta;
+        for (int i=0; i < cloud_theta->size(); i++) {
+          cloud_theta->points[i].y = 0;
+          cloud_theta->points[i].z = 0;
 
-          float n_rho_base = z_start - z_end;
-          float n_z_base = -(rho_start - rho_end);
+          vec_theta.push_back(cloud_theta->points[i].x);
+        }
 
-          float n_length = std::sqrt(std::pow(n_rho_base, 2) + std::pow(n_z_base, 2));
-          n_rho_base /= n_length;
-          n_z_base /= n_length;
+        float min_theta = *std::min_element(vec_theta.begin(), vec_theta.end());
+        float max_theta = *std::max_element(vec_theta.begin(), vec_theta.end());
 
-          float max_z2base = -999;
-          int potential_idx = -1;
-          int edge_i = -1;
-          for (int i=0; i<PPEs.size(); i++) {
-            float diff_rho_ppe = PPEs[i].rho - PPEs[0].rho;
-            float diff_z_ppe = PPEs[i].z - PPEs[0].z;
-            float z2base_ppe = std::abs(n_rho_base * diff_rho_ppe + n_z_base * diff_z_ppe);
-            PPEs[i].z2base = z2base_ppe;
+        pcl::KdTreeFLANN<pcl::PointXYZ> kdtree;
+        kdtree.setInputCloud(cloud_theta);
+        float radius = 0.5;
 
-            if (PPEs[i].z2base > max_z2base) {
-              max_z2base = PPEs[i].z2base;
-              potential_idx = PPEs[i].idx;
-              edge_i = i;
+        for (float t=min_theta; t<max_theta; t++) {
+          std::vector<int> pointIdxRadiusSearch;
+          std::vector<float> pointRadiusSquaredDistance;
+
+          pcl::PointXYZ searchPoint;
+          searchPoint.x = t;
+          searchPoint.y = 0;
+          searchPoint.z = 0;
+
+          if ( kdtree.radiusSearch (searchPoint, radius, pointIdxRadiusSearch, pointRadiusSquaredDistance) > 0 ) {
+            std::vector<PointPotentialEdge> PPEs;
+            for (int i=0; i<pointIdxRadiusSearch.size(); i++) {
+              int ppe_idx = pointIdxRadiusSearch[i];
+              float ppe_rho = cloud_cylinder->points[ppe_idx].y;
+              float ppe_z = cloud_cylinder->points[ppe_idx].z;
+              PointPotentialEdge ppe(ppe_idx, ppe_rho, ppe_z);
+              PPEs.push_back(ppe);
             }
-          }
+            std::sort(PPEs.begin(), PPEs.end(), ByRhoPPE());
 
-          if ((potential_idx >= PPEs.size()) && max_z2base > 1) {
-            edge_idx.push_back(potential_idx);
-            for (int back_i=edge_i+1; back_i<PPEs.size(); back_i++) {
-              back_idx.push_back(PPEs[back_i].idx);
+            float rho_start = PPEs[0].rho;
+            float z_start = PPEs[0].z;
+            float rho_end = PPEs.back().rho;
+            float z_end = PPEs.back().z;
+
+            float n_rho_base = z_start - z_end;
+            float n_z_base = -(rho_start - rho_end);
+
+            float n_length = std::sqrt(std::pow(n_rho_base, 2) + std::pow(n_z_base, 2));
+            n_rho_base /= n_length;
+            n_z_base /= n_length;
+
+            float max_z2base = -999;
+            int potential_idx = -1;
+            int edge_i = -1;
+            for (int i=0; i<PPEs.size(); i++) {
+              float diff_rho_ppe = PPEs[i].rho - PPEs[0].rho;
+              float diff_z_ppe = PPEs[i].z - PPEs[0].z;
+              float z2base_ppe = std::abs(n_rho_base * diff_rho_ppe + n_z_base * diff_z_ppe);
+              PPEs[i].z2base = z2base_ppe;
+
+              if (PPEs[i].z2base > max_z2base) {
+                max_z2base = PPEs[i].z2base;
+                potential_idx = PPEs[i].idx;
+                edge_i = i;
+              }
             }
-            far_point_idx.push_back(PPEs.back().idx);
-            float r = std::sqrt(std::pow(cloud->points[edge_idx.back()].x - cx, 2) + std::pow(cloud->points[edge_idx.back()].y - cy, 2));
-            vec_r.push_back(r);
+
+            if ((potential_idx >= PPEs.size()) && max_z2base > 1) {
+              edge_idx.push_back(potential_idx);
+              for (int back_i=edge_i+1; back_i<PPEs.size(); back_i++) {
+                back_idx.push_back(PPEs[back_i].idx);
+              }
+              far_point_idx.push_back(PPEs.back().idx);
+              float r = std::sqrt(std::pow(cloud->points[edge_idx.back()].x - cx, 2) + std::pow(cloud->points[edge_idx.back()].y - cy, 2));
+              vec_r.push_back(r);
+            }
           }
         }
-      }
 
-      vec_edge_idx.push_back(edge_idx);
-      vec_back_idx.push_back(back_idx);
-      vec_far_point_idx.push_back(far_point_idx);
+        vec_edge_idx.push_back(edge_idx);
+        vec_back_idx.push_back(back_idx);
+        vec_far_point_idx.push_back(far_point_idx);
 
-      float sum_r = std::accumulate(vec_r.begin(), vec_r.end(), 0.0);
-      float mean_r = sum_r / vec_r.size();
-      std::vector<float> vec_r_diff_square(vec_r.size());
-      for (int i=0; i<vec_r.size(); i++) {
-        vec_r_diff_square.push_back(std::pow(vec_r[i] - mean_r, 2));
+        float sum_r = std::accumulate(vec_r.begin(), vec_r.end(), 0.0);
+        float mean_r = sum_r / vec_r.size();
+        std::vector<float> vec_r_diff_square(vec_r.size());
+        for (int i=0; i<vec_r.size(); i++) {
+          vec_r_diff_square.push_back(std::pow(vec_r[i] - mean_r, 2));
+        }
+        float sq_sum_r = std::accumulate(vec_r_diff_square.begin(), vec_r_diff_square.end(), 0.0);
+        vec_r_std.push_back(std::sqrt(sq_sum_r / vec_r.size()));
       }
-      float sq_sum_r = std::accumulate(vec_r_diff_square.begin(), vec_r_diff_square.end(), 0.0);
-      vec_r_std.push_back(std::sqrt(sq_sum_r / vec_r.size()));
+    }
+    
+    selected_c_idx = std::distance(vec_r_std.begin(), std::min_element(vec_r_std.begin(), vec_r_std.end()));
+    
+    if (vec_r_std[selected_c_idx] < min_r_std) {
+      min_r_std = vec_r_std[selected_c_idx];
+
+      cx = vec_cx[selected_c_idx];
+      cy = vec_cy[selected_c_idx];
+      edge_idx = vec_edge_idx[selected_c_idx];
+      back_idx = vec_back_idx[selected_c_idx];
+      far_point_idx = vec_far_point_idx[selected_c_idx];
+
+      int chosen_ix = vec_ix[selected_c_idx];
+      int chosen_iy = vec_iy[selected_c_idx];
+
+      std::vector<float> vec_new_x_le_re = set_le_re(lx, rx, chosen_ix, slice_num);
+      std::vector<float> vec_new_y_le_re = set_le_re(ly, ry, chosen_iy, slice_num);
+
+      lx = vec_new_x_le_re[0];
+      rx = vec_new_x_le_re[1];
+      ly = vec_new_y_le_re[0];
+      ry = vec_new_y_le_re[1];
+    } else {
+      break;
     }
   }
   
-
-  int selected_c_idx = std::distance(vec_r_std.begin(), std::min_element(vec_r_std.begin(), vec_r_std.end()));
-  
-  float cx = vec_cx[selected_c_idx];
-  float cy = vec_cy[selected_c_idx];
-  std::vector<int> edge_idx = vec_edge_idx[selected_c_idx];
-  std::vector<int> back_idx = vec_back_idx[selected_c_idx];
-  std::vector<int> far_point_idx = vec_far_point_idx[selected_c_idx];
-
   EdgeInfo edge_info(cx, cy, edge_idx, back_idx, far_point_idx);
 
   return edge_info;
@@ -1009,7 +1094,7 @@ int main (int argc, char** argv) {
   pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_wall = remove_wall_result.cloud_wall;
   cloud = remove_outliers(cloud);
 
-  plot(cloud);
+  // plot(cloud);
   // plot(cloud_wall);
 
   // -- compute normals
