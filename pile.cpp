@@ -1064,7 +1064,7 @@ int main (int argc, char** argv) {
   std::vector<int> filenames;
   filenames = pcl::console::parse_file_extension_argument (argc, argv, ".pcd");
   pcl::PointCloud<pcl::PointXYZ>::Ptr origin_cloud (new pcl::PointCloud<pcl::PointXYZ>);
-  if ( pcl::io::loadPCDFile <pcl::PointXYZ> (argv[filenames[0]], *origin_cloud) == -1) {
+  if ( filenames.empty() || (pcl::io::loadPCDFile <pcl::PointXYZ> (argv[filenames[0]], *origin_cloud) == -1) ) {
     std::cout << "Cloud reading failed." << std::endl;
     return -1;
   }
